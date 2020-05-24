@@ -1,164 +1,229 @@
 import struct
-from .transport_echo import *
-from .transport_usbhid import *
 
-# Interesting note: responses to set commands return length 1
-# of the command used to set whatever value it was. However,
-# the following bytes do contain the new values. Look into this.
+from .hid_wrapper import HID_Device
 
 
 class Board2x4HD:
     """ Commands for 2x4HD """
 
-    def __init__(self, transport):
-        if transport == "usbhid":
-            self._transport = TransportUSBHID(0x2752, 0x0011)
-        elif transport == "echo":
-            self._transport = TransportEcho()
-        else:
-            raise RuntimeError(
-                "Provided transport " + transport + " is not a valid option"
-            )
+    def __init__(self):
+        self._device = HID_Device()
 
-    def _masterStatus(self):
+    def _get_status(self):
         status = {}
-        # Send master status check command
-        resp = self._transport.write([0x05, 0xFF, 0xDA, 0x02])
-        # sometimes we get back other stuff from the card, and have to get past them
-        # before we can get what we want...
-        tries = 1
-        while resp[:3] != [0x05, 0xFF, 0xDA]:
-            if tries > 10:
-                raise RuntimeError(
-                    "Tried >10 times to get a valid response to master status! Crashing!"
-                )
-            # some known values that often come back are
-            # ['0x5', '0xff', '0xd9', '0x02']
-            # d9 is switching source; 02 is for example the usb input, so might as well process those
-            if resp and (len(resp) > 2) and resp[2] == "0xd9":
-                # throw it in just to be nice so we don't have to do it later
-                status["source"] = ["analog", "toslink", "usb"][resp[3]]
-            # try again
-            tries += 1
-            resp = self._transport.write([0x05, 0xFF, 0xDA, 0x02])
+        # send the 'get status command'
+        COMMAND = [0x05, 0xFF, 0xDA, 0x02]
+        with self._device as d:
+            d.write(COMMAND)
+            response = d.read()
+            # sometimes we get back other stuff from the card, and have to get past them
+            # before we can get what we want...
+            tries = 1
+            while response[:3] != COMMAND[:3]:
+                if tries > 10:
+                    raise RuntimeError(
+                        "Tried >10 times to get a valid response to master status! Crashing!"
+                    )
+                # some known values that often come back are
+                # ['0x5', '0xff', '0xd9', '0x02']
+                # d9 is switching source; 02 is for example the usb input, so might as well process those
+                if response and (len(response) > 2) and response[2] == "0xd9":
+                    # throw it in just to be nice so we don't have to do it later
+                    status["source"] = ["analog", "toslink", "usb"][response[3]]
+                # try again
+                d.write(COMMAND)
+                tries += 1
+                response = d.read()
 
-        # if we've made it here, some valid volume/mute information is likely...
-        # and resp starts with [0x05, 0xFF, 0xDA]
-        if resp[4] not in [0x00, 0x01]:
-            raise RuntimeError(
-                "Received unexpected response: bad mute value " + str(resp)
-            )
-        status["volume"] = resp[3] * -0.5
-        status["mute"] = resp[4] == 0x01
-        # add status
+            # if we've made it here, some valid volume/mute information is likely...
+            # and resp starts with [0x05, 0xFF, 0xDA]
+            if response[4] not in [0x00, 0x01]:
+                raise RuntimeError(
+                    "Received unexpected response: bad mute value " + str(response)
+                )
+            status["volume"] = response[3] * -0.5
+            status["mute"] = response[4] == 0x01
+
         if "source" not in status:
-            status["source"] = self.getInputSource()
+            status["source"] = self._get_source()
         return status
 
-    def getMute(self):
-        # Get mute from master status
-        return self._masterStatus()["mute"]
+    status = property(_get_status)
 
-    def setMute(self, mute):
-        # Send mute command
-        self._transport.write([0x17, 0x01 if mute else 0x00])
+    def _get_volume(self):
+        return self._get_status()["volume"]
 
-    def getVolume(self):
-        # Get volume from master status
-        return self._masterStatus()["volume"]
-
-    def setVolume(self, volume):
-        # Integrity check
+    def _set_volume(self, volume):
         if (volume > 0) or (volume < -127.5):
             raise RuntimeError("Volume out of bounds. Range: -127.5 to 0 (db)")
         # Send volume command
-        self._transport.write([0x42, round(-2 * volume)])
+        with self._device as d:
+            d.write([0x42, round(-2 * volume)])
 
-    def getInputSource(self):
+    volume = property(_get_volume, _set_volume)
+
+    def volume_up(self, notches=1):
+        """turn the volume up by 'notches' which are 0.5db"""
+        current_volume = self._get_volume()
+        assert (
+            type(notches) is int
+        ), "Can't send that in for volume change! only ints please"
+        new_volume = current_volume + (notches * 0.5)
+        assert -127.5 <= new_volume <= 0, "That would set volume out of bounds!"
+        self._set_volume(new_volume)
+
+    def volume_down(self, notches=1):
+        """turn the volume down by 'notches' which are 0.5db"""
+        self.volume_up(-notches)
+
+    def _get_mute(self):
+        return self._get_status()["mute"]
+
+    def _set_mute(self, mute_status=True):
+        assert mute_status in (True, False), "Can only send True or False"
+        with self._device as d:
+            if mute_status:
+                m = 0x01
+            else:
+                m = 0x00
+            d.write([0x17, m])
+
+    def mute(self):
+        self._set_mute(True)
+
+    def unmute(self):
+        self._set_mute(False)
+
+    muted = property(_get_mute, _set_mute)
+
+    def mute_toggle(self):
+        if self._get_mute():
+            self._set_mute(False)
+        else:
+            self._set_mute(True)
+
+    def _get_source(self):
         # Send input source check command
-        resp = self._transport.write([0x05, 0xFF, 0xD9, 0x01])
-        # Validity checking
-        tries = 1
-        while resp[:3] != [0x05, 0xFF, 0xD9]:
-            if tries > 10:
-                raise RuntimeError(
-                    "Tried >10 times to get a valid response to inputSource! Crashing!"
-                )
-            # could log what we DO get back here, but don't have a place to do that right now...
-            resp = self._transport.write([0x05, 0xFF, 0xD9, 0x01])
+        COMMAND = [0x05, 0xFF, 0xD9, 0x01]
+        with self._device as d:
+            tries = 1
+            d.write(COMMAND)
+            response = d.read()
+            tries = 1
+            while response[:3] != COMMAND[:3]:
+                if tries > 10:
+                    raise RuntimeError(
+                        "Tried >10 times to get a valid response to inputSource! Crashing!"
+                    )
+                # could log what we DO get back here, but don't have a place to do that right now...
+                # try again
+                d.write(COMMAND)
+                tries += 1
+                response = d.read()
 
-        # if we've made it here, some valid source information is likely...
-        # and resp starts with [0x05, 0xFF, 0xD9]
-        if resp[3] not in [0x00, 0x01, 0x02]:
-            raise RuntimeError(
-                "Received unexpected response: bad source value " + str(resp)
-            )
+            # if we've made it here, some valid source information is likely...
+            # and resp starts with [0x05, 0xFF, 0xD9]
+            if response[3] not in [0x00, 0x01, 0x02]:
+                raise RuntimeError(
+                    "Received unexpected response: bad source value {}".format(
+                        response[3]
+                    )
+                )
         # Return the source string
         sources = ["analog", "toslink", "usb"]
-        return sources[resp[3]]
+        return sources[response[3]]
 
-    def setInputSource(self, source):
-        # Integrity check
-        if not (source in ["analog", "toslink", "usb"]):
-            raise RuntimeError("Invalid input source provided")
-        # Send input change command
+    def _set_source(self, source):
         sources = {"analog": 0x00, "toslink": 0x01, "usb": 0x02}
-        self._transport.write([0x34, sources[source]])
+        assert source in sources, "oops, that's not a valid source"
+        with self._device as d:
+            d.write([0x34, sources[source]])
 
-    def getConfig(self):
+    source = property(_get_source, _set_source)
+
+    def _get_config(self):
         # Send config check command
-        resp = self._transport.write([0x05, 0xFF, 0xD8, 0x01])
-        # Validity checking
-        if (resp[:3] != [0x05, 0xFF, 0xD8]) or not (
-            resp[3] in [0x00, 0x01, 0x02, 0x03]
-        ):
-            raise RuntimeError("Received unexpected response: " + str(resp))
-        # Return the source index (1-indexed)
-        return resp[3] + 1
+        COMMAND = [0x05, 0xFF, 0xD8, 0x01]
+        with self._device as d:
+            d.write(COMMAND)
+            response = d.read()
+            tries = 1
+            while response[:3] != COMMAND[:3]:
+                if tries > 10:
+                    raise RuntimeError(
+                        "Tried >10 times to get a valid response to get config! Crashing!"
+                    )
+                # could log what we DO get back here, but don't have a place to do that right now...
+                # try again
+                d.write(COMMAND)
+                tries += 1
+                response = d.read()
 
-    def setConfig(self, config):
+        if response[3] not in [0x00, 0x01, 0x02, 0x03]:
+            raise RuntimeError("Received unexpected config value: {}".format(response[3]))
+        # Return the source index (1-indexed)
+        return response[3] + 1
+
+    def _set_config(self, config):
         # Integrity check
         if (config < 1) or (config > 4):
             raise RuntimeError("Config index out of range (should be 1-4)")
-        # Send the config change command
-        self._transport.write([0x25, config - 1, 0x02])
-        self._transport.write([0x05, 0xFF, 0xE5, 0x01])
-        self._transport.write([0x05, 0xFF, 0xE0, 0x01])
-        self._transport.write([0x05, 0xFF, 0xDA, 0x02])
+        with self._device as d:
+            # these are all from mark's original code; not sure about it, as I don't
+            # use configs now
+            d.write([0x25, config - 1, 0x02])
+            d.write([0x05, 0xFF, 0xE5, 0x01])
+            d.write([0x05, 0xFF, 0xE0, 0x01])
+            d.write([0x05, 0xFF, 0xDA, 0x02])
 
-    def getLevels(self):
+    config = property(_get_config, _set_config)
+
+    def _get_levels(self):
         # get input levels on the DSP right now.
         # adapted from https://github.com/mrene/node-minidsp/
-        command = [0x14, 0x00, 0x44, 0x02]
-        resp = self._transport.write(command)
-        # Validity checking
-        if resp[:3] != [0x14, 0x00, 0x44]:
-            raise RuntimeError("Received unexpected response: " + str(resp))
+        COMMAND = [0x14, 0x00, 0x44, 0x02]
+        with self._device as d:
+            d.write(COMMAND)
+            response = d.read()
+            tries = 1
+            while response[:3] != COMMAND[:3]:
+                if tries > 10:
+                    raise RuntimeError(
+                        "Tried >10 times to get a valid response to get levels! Crashing!"
+                    )
+                d.write(COMMAND)
+                tries += 1
+                response = d.read()
+
         # current levels are in the response in two 32bit low-endian floats
         # at index 3-7 and 8-11 inclusive; so unpack two nums...
-        # no rounding or anything, so if sending down a json wire or something
-        # you might want to trim
-        return struct.unpack("<ff", bytes(resp[3:11]))
+        # @@ probably fragile here :-(
+        (l, r) = struct.unpack("<ff", bytes(response[3:11]))
 
-    def _setInputGain(self, input=0, gain=0):
+        # trim those 32bit floats down...
+        return (round(l, 2), round(r, 2))
+
+    levels = property(_get_levels)
+
+    def _set_input_gain(self, input=0, gain=0):
+        # nb! input is not the source; it's left or right, essentially
         # input either 0 or 1; gain from -127.5 to +12
-        if (gain > 12) or (gain < -127.5):
-            raise RuntimeError("Gain out of bounds. Range: -127.5 to 12 (db)")
-
-        if input not in (0, 1):
-            raise RuntimeError("input should be either 0 or 1")
+        assert -127.5 <= gain <= 12, "Gain out of bounds. Range: -127.5 to 12 (db)"
+        assert input in (0, 1), "input should be either 0 or 1"
         # again, this is adapted from https://github.com/mrene/node-minidsp/
         # the node code has that last byte either at 0x1A or 0x1B, depending on input, so...
-        command = [0x13, 0x80, 0x0, 0x1A + input]
-
+        COMMAND = [0x13, 0x80, 0x0, 0x1A + input]
         # pack the gain value into a little-endian 32bit bytes string
         # and add those 4 bytes to the command
-        command += list(struct.pack("<f", gain))
+        COMMAND += list(struct.pack("<f", gain))
 
-        resp = self._transport.write(command)
-        return resp
+        with self._device as d:
+            d.write(COMMAND)
+            # doesn't seem to return anything, but ...
+            response = d.read()
+        return response
 
-    def setGain(self, gain):
+    def set_gain(self, gain):
         # set input gain for both input channels; use the _setInputGain to set individual ones
-        self._setInputGain(0, gain)
-        self._setInputGain(1, gain)
+        self._set_input_gain(0, gain)
+        self._set_input_gain(1, gain)

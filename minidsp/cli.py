@@ -1,87 +1,96 @@
+"""command line access to the board"""
+
 import argparse
 
-import minidsp
+from minidsp.board_2x4hd import Board2x4HD
 
-boards = ['2x4HD', 'DDRC24']
-controls = ['volume', 'mute', 'input', 'config', 'dirac', 'gain', 'levels']
+# I removed gain and config from here, because I don't want to casually
+# muck with those and possibly damage my speakers. Others may want them back.
+#
+# I also removed dirac stuff, because I don't have one and can't test it.
+
+controls = [
+    # read only ones...
+    "status",
+    "levels",
+    "muted",
+    # ones that do one thing...
+    "mute",
+    "unmute",
+    # ones that always do one thing and can take an argument...
+    "volume_up",
+    "volume_down",
+    # ones that can either return current state or change it
+    "volume",
+    "source",
+]
+
 
 def main():
     # argparse setup
     parser = argparse.ArgumentParser(
-            description="Command and control for various MiniDSP boards")
-    parser.add_argument('board', metavar='board', type=str,
-            choices=boards,
-            help="Board selection (" + ", ".join(boards) + ")")
-    parser.add_argument('action', metavar='action', type=str,
-            choices=['get', 'set'],
-            help="Action (get, set)")
-    parser.add_argument('control', type=str,
-            help="Control (" + ", ".join(controls) + ")")
-    parser.add_argument('value', type=str, nargs='?',
-            help="Value to set, if action is 'set'")
-    parser.add_argument('-t', '--transport', type=str,
-            choices=['usbhid','echo'], default='usbhid',
-            help="Transport method to use")
+        description="Send commands to a MiniDSP 2x4 HD board"
+    )
+    parser.add_argument("control", type=str, help="Control (" + ", ".join(controls) + ")")
+    parser.add_argument(
+        "value", type=str, nargs="?", help="Value to set, if an action is to be 'set'"
+    )
     args = parser.parse_args()
 
-    # invalid configuration checking
-    if args.action == 'set' and args.value is None:
-        parser.error("A value must be provided when the action is 'set'")
-    if args.board != 'DDRC24' and args.control == 'dirac':
-        parser.error("Dirac control only applicable for DDRC24")
+    board = Board2x4HD()
 
-    # setup the board
-    board = None
-    if args.board == '2x4HD':
-        board = minidsp.board_2x4hd.Board2x4HD(args.transport)
-    elif args.board == 'DDRC24':
-        board = minidsp.board_ddrc24.BoardDDRC24(args.transport)
+    # read-only things:
+    if args.control == "status":
+        print("Status:", board.status)
+    elif args.control == "levels":
+        print("Playing Levels are {}".format(board.levels))
+    elif args.control == "muted":
+        print("Muted" if board.muted else "Unmuted")
 
-    if args.action == 'get':
-        if args.control == 'volume':
-            print("Volume:", board.getVolume(), "dB")
-        elif args.control == 'mute':
-            print("Muted" if board.getMute() else "Unmuted")
-        elif args.control == 'input':
-            print(board.getInputSource())
-        elif args.control == 'config':
-            print("Config", board.getConfig())
-        elif args.control == 'dirac':
-            print("Dirac on" if board.getDiracStatus() else "Dirac off")
-        elif args.control == 'levels':
-            print("Playing Levels are {}".format(board.getLevels()))
-    elif args.action == 'set':
-        if args.control == 'volume':
+    # do-one-thing things
+    elif args.control == "mute":
+        board.mute()
+        print("Muted")
+    elif args.control == "unmute":
+        board.unmute()
+        print("Unmuted")
+
+    # can take a value or not
+    elif args.control in ("volume_up", "volume_down"):
+        if args.value:
             try:
-                volFloat = float(args.value)
-            except:
-                parser.error("Volume must be provided in db and without units ('-127.5' to '0')")
-            board.setVolume(volFloat)
-        elif args.control == 'mute':
-            if args.value == 'on':
-                board.setMute(True)
-            elif args.value == 'off':
-                board.setMute(False)
-            else:
-                parser.error("Mute must be set to 'on' or 'off'")
-        elif args.control == 'input':
-            board.setInputSource(args.value)
-        elif args.control == 'config':
-            board.setConfig(int(args.value))
-        elif args.control == 'dirac':
-            if args.value == 'on':
-                board.setDiracStatus(True)
-            elif args.value == 'off':
-                board.setDiracStatus(False)
-            else:
-                parser.error("Dirac must be set to 'on' or 'off'")
-        if args.control == 'gain':
-            try:
-                gainFloat = float(args.value)
-            except:
-                parser.error("Gain must be provided in db and without units ('-127.5' to '12')")
-            board.setGain(gainFloat)
+                notches = int(args.value)
+            except ValueError:
+                parser.error(
+                    "Volume change must be provided as an integer representing notches"
+                )
+        else:
+            notches = 1
+        if args.control == "volume_up":
+            board.volume_up(notches)
+        elif args.control == "volume_down":
+            board.volume_down(notches)
+        print("New volume: {} dB".format(board.volume))
 
-if __name__ == '__main__':
+    # ones that can either return current state or change it
+    elif args.control == "volume":
+        if args.value:
+            try:
+                vol_float = float(args.value)
+            except ValueError:
+                parser.error(
+                    "Volume must be provided in db and without units ('-127.5' to '0')"
+                )
+            board._set_volume(vol_float)
+        print("Volume: {} dB".format(board.volume))
+    elif args.control == "source":
+        if args.value:
+            if args.value in ("usb", "analog", "toslink"):
+                board._set_source(args.value)
+            else:
+                parser.error("invalid source name")
+        print(board.source)
+
+
+if __name__ == "__main__":
     main()
-
