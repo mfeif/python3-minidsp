@@ -43,24 +43,17 @@ class HID_Device(AbstractContextManager):
     def write(self, command):
         if not self._opened:
             raise RuntimeError("Device not open; use 'with' syntax to read/write")
-        # # init hid command to report id (0) plus 64 0xFF
-        # hid_buf = [0x00] + [0xFF] * 64
         # Add header specifying command length (+1 for CRC8 byte)
         command = [len(command) + 1] + command
         # Add a CRC8 byte at the end
         command = command + [sum(command) % 0x100]
-
-        # Insert the fully fledged command into the data sequence
-        # hid_buf[1 : len(command) + 1] = command
         self._device.write([0x00] + command)
 
     def read(self):
         if not self._opened:
             raise RuntimeError("Device not opened; use 'with' syntax to read/write")
-
-        length = 64
+        length = 64  # not sure why this; it seems to be in the examples, though
         timeout_ms = 2000
         response = self._device.read(length, timeout_ms)
-
         # First byte is the response length
         return response[1 : response[0]]
